@@ -16,7 +16,7 @@ Certifique-se de ter instalado:
 
 - **Clone o repositório**
    ```bash
-   git (https://github.com/liviacanuto/programacao_concorrente_distribuida.git
+   git https://github.com/liviacanuto/programacao_concorrente_distribuida.git
    cd programacao_concorrente_distribuida
    ```
 
