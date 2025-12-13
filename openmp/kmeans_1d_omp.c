@@ -91,7 +91,7 @@ static double assignment_step_1d_omp(const double *X, const double *C, int *assi
 /* update: média dos pontos de cada cluster (1D) usando acumuladores por thread */
 static void update_step_1d_omp(const double *X, double *C, const int *assign, int N, int K){
     int num_threads = omp_get_max_threads();
-    
+
     /* Alocar acumuladores por thread */
     double **sum_thread = (double**)malloc((size_t)num_threads * sizeof(double*));
     int **cnt_thread = (int**)malloc((size_t)num_threads * sizeof(int*));
@@ -113,8 +113,6 @@ static void update_step_1d_omp(const double *X, double *C, const int *assign, in
     #pragma omp parallel
     {
         int tid = omp_get_thread_num();
-        
-        /* Cada thread acumula em seus próprios arrays */
         #pragma omp for
         for(int i=0;i<N;i++){
             int a = assign[i];
@@ -122,36 +120,26 @@ static void update_step_1d_omp(const double *X, double *C, const int *assign, in
             sum_thread[tid][a] += X[i];
         }
     }
-    
-    /* Redução sequencial dos acumuladores das threads */
-    double *sum = (double*)calloc((size_t)K, sizeof(double));
-    int *cnt = (int*)calloc((size_t)K, sizeof(int));
-    
-    if(!sum || !cnt){ 
-        fprintf(stderr,"Sem memoria para arrays de redução\n"); 
-        exit(1); 
-    }
-    
-    for(int t=0; t<num_threads; t++){
-        for(int c=0; c<K; c++){
-            cnt[c] += cnt_thread[t][c];
-            sum[c] += sum_thread[t][c];
+
+    for (int c = 0; c < K; c++) {
+        double sum = 0.0;
+        int cnt = 0;
+        for (int t = 0; t < num_threads; t++) {
+            sum += sum_thread[t][c];
+            cnt += cnt_thread[t][c];
         }
+        /* Calcular novos centróides */
+        if (cnt > 0) C[c] = sum / cnt;
+        else         C[c] = X[0];
+    }
+
+    for (int t=0; t < num_threads; t++) {
         free(sum_thread[t]);
         free(cnt_thread[t]);
     }
-    
+
     free(sum_thread);
     free(cnt_thread);
-    
-    /* Calcular novos centróides */
-    for(int c=0;c<K;c++){
-        if(cnt[c] > 0) C[c] = sum[c] / (double)cnt[c];
-        else           C[c] = X[0]; /* simples: cluster vazio recebe o primeiro ponto */
-    }
-    
-    free(sum);
-    free(cnt);
 }
 
 /* Versão alternativa do update com seção critica */
@@ -219,7 +207,6 @@ int main(int argc, char **argv){
     if(argc < 3){
         printf("Uso: %s dados.csv centroides_iniciais.csv [max_iter=50] [eps=1e-4] [assign.csv] [centroids.csv]\n", argv[0]);
         printf("Obs: arquivos CSV com 1 coluna (1 valor por linha), sem cabeçalho.\n");
-        printf("Compilar com: gcc -O2 -std=c99 -fopenmp kmeans_1d_omp.c -o kmeans_1d_omp -lm\n");
         return 1;
     }
     const char *pathX = argv[1];
@@ -240,17 +227,18 @@ int main(int argc, char **argv){
     int *assign = (int*)malloc((size_t)N * sizeof(int));
     if(!assign){ fprintf(stderr,"Sem memoria para assign\n"); free(X); free(C); return 1; }
 
-    printf("K-means 1D Paralelizado (OpenMP)\n");
+    printf("K-means 1D OpenMP\n");
     printf("N=%d K=%d max_iter=%d eps=%g\n", N, K, max_iter, eps);
-    printf("Threads disponíveis: %d\n", omp_get_max_threads());
+    printf("Threads disponiveis: %d\n", omp_get_max_threads());
 
     clock_t t0 = clock();
-    int iters = 0; double sse = 0.0;
+    int iters = 0;
+    double sse = 0.0;
     kmeans_1d_omp(X, C, assign, N, K, max_iter, eps, &iters, &sse);
     clock_t t1 = clock();
     double ms = 1000.0 * (double)(t1 - t0) / (double)CLOCKS_PER_SEC;
 
-    printf("Iterações: %d | SSE final: %.6f | Tempo: %.1f ms\n", iters, sse, ms);
+    printf("Iteracoes: %d | SSE final: %.6f | Tempo: %.1f ms\n", iters, sse, ms);
 
     write_assign_csv(outAssign, assign, N);
     write_centroids_csv(outCentroid, C, K);
