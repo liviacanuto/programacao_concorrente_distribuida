@@ -145,37 +145,32 @@ static void update_step_1d_omp(const double *X, double *C, const int *assign, in
 /* Versão alternativa do update com seção critica */
 static void update_step_1d_omp_critical(const double *X, double *C, const int *assign, int N, int K){
     double *sum = (double*)calloc((size_t)K, sizeof(double));
-    int *cnt = (int*)calloc((size_t)K, sizeof(int));
-    if(!sum || !cnt){ fprintf(stderr,"Sem memoria no update\n"); exit(1); }
+    int    *cnt = (int*)calloc((size_t)K, sizeof(int));
+
+    if (!sum || !cnt) {
+        fprintf(stderr, "Sem memoria\n");
+        exit(1);
+    }
 
     #pragma omp parallel
     {
-        double *sum_local = (double*)calloc((size_t)K, sizeof(double));
-        int *cnt_local = (int*)calloc((size_t)K, sizeof(int));
-        
         #pragma omp for
-        for(int i=0;i<N;i++){
+        for (int i = 0; i < N; i++) {
             int a = assign[i];
-            cnt_local[a] += 1;
-            sum_local[a] += X[i];
-        }
-        
-        #pragma omp critical
-        {
-            for(int c=0; c<K; c++){
-                cnt[c] += cnt_local[c];
-                sum[c] += sum_local[c];
+
+            #pragma omp critical
+            {
+                cnt[a] += 1;
+                sum[a] += X[i];
             }
         }
-        
-        free(sum_local);
-        free(cnt_local);
     }
-    
-    for(int c=0;c<K;c++){
-        if(cnt[c] > 0) C[c] = sum[c] / (double)cnt[c];
-        else           C[c] = X[0];
+
+    for (int c = 0; c < K; c++) {
+        if (cnt[c] > 0) C[c] = sum[c] / cnt[c];
+        else            C[c] = X[0]; 
     }
+
     free(sum);
     free(cnt);
 }
@@ -195,7 +190,7 @@ static void kmeans_1d_omp(const double *X, double *C, int *assign,
             it++;
             break;
         }
-        update_step_1d_omp(X, C, assign, N, K);
+        update_step_1d_omp_critical(X, C, assign, N, K);
         prev_sse = sse;
     }
     *iters_out = it;
