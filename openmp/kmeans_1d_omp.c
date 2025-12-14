@@ -190,7 +190,7 @@ static void kmeans_1d_omp(const double *X, double *C, int *assign,
             it++;
             break;
         }
-        update_step_1d_omp_critical(X, C, assign, N, K);
+        update_step_1d_omp(X, C, assign, N, K);
         prev_sse = sse;
     }
     *iters_out = it;

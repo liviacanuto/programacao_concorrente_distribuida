@@ -158,9 +158,6 @@ int main(int argc, char **argv){
     int *assign = (int*)malloc((size_t)N * sizeof(int));
     if(!assign){ fprintf(stderr,"Sem memoria para assign\n"); free(X); free(C); return 1; }
 
-    for(int i=0;i<N;i++) printf("X[%d]=%.10f\n", i, X[i]);
-    for(int j=0;j<K;j++) printf("C[%d]=%.10f\n", j, C[j]);
-
     clock_t t0 = clock();
     int iters = 0; double sse = 0.0;
     kmeans_1d(X, C, assign, N, K, max_iter, eps, &iters, &sse);
