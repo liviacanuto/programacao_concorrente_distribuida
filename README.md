@@ -22,7 +22,7 @@ Certifique-se de ter instalado:
 
 - **Garanta que os arquivos de código e de dados estejam na mesma pasta**
 
-#### Etapa 1 - OpenMP
+### Etapa 1 - OpenMP
 
 #### 1.1. **Compile o código**
    ```bash
@@ -69,3 +69,61 @@ Caso queira visualizar a **versão com seção crítica** (`update_step_1d_omp_c
    ```
 
 ⚠️ **Importante:** sempre recompile após alterar a função de update.
+
+
+### Etapa 2 - CUDA
+
+A versão CUDA do K-means 1D executa as etapas de assignment e update na GPU, utilizando kernels CUDA para paralelizar o processamento dos pontos.
+
+##### Pré-requisitos adicionais
+
+- **NVIDIA GPU** compatível com CUDA  
+- **CUDA Toolkit** instalado (nvcc disponível no PATH)  
+- Driver NVIDIA corretamente configurado  
+
+Para verificar se o CUDA está disponível:
+```bash
+nvcc --version
+nvidia-smi
+```
+
+#### 2.1 Compile o código CUDA**
+
+Utilize o nvcc para compilar:
+```bash
+nvcc -O2 kmeans_1d_cuda.cu -o kmeans_1d_cuda
+```
+
+**2.2 Execute o programa**
+```bash
+./kmeans_1d_cuda dados.csv centroides_iniciais.csv [max_iter=50] [eps=1e-4] [assign.csv] [centroids.csv]
+```
+
+### Etapa 3 - MPI
+
+A versão MPI implementa o K-means 1D distribuído, onde os dados são divididos entre múltiplos processos.
+Cada processo calcula o assignment local e o erro (SSE), e os resultados são combinados usando operações de redução (MPI_Reduce / MPI_Allreduce).
+
+Pré-requisitos adicionais
+
+- MPI instalado (OpenMPI ou MPICH)
+- Compilador mpicc disponível
+
+Verifique a instalação:
+```bash
+mpicc --version
+mpirun --version
+```
+
+#### 3.1 Compile o código MPI
+```bash
+mpicc -O2 -std=c99 kmeans_1d_mpi.c -o kmeans_1d_mpi -lm
+```
+
+#### 3.2 Execute o programa
+
+Use mpirun ou mpiexec para definir o número de processos:
+```bash
+mpirun -np 4 ./kmeans_1d_mpi dados.csv centroides_iniciais.csv [max_iter=50] [eps=1e-4] [assign.csv] [centroids.csv]
+```
+
