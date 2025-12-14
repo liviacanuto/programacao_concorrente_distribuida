@@ -188,7 +188,7 @@ int main(int argc, char **argv){
     if(rank == 0){
         X_full = read_csv_1col(pathX, &N);
         C      = read_csv_1col(pathC, &K);
-        printf("K-means 1D (naive)\n");
+        printf("K-means 1D MPI\n");
         printf("N=%d K=%d max_iter=%d eps=%g\n", N, K, max_iter, eps);
     }
 
