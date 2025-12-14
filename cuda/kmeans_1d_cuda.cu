@@ -69,19 +69,29 @@ static void write_centroids_csv(const char *path, const double *C, int K){
 }
 
 /* ---------- k-means 1D ---------- */
-__global__ void assignment_step_1d_cuda(const double *X, const double *C, int *assign, double *sse, int N, int K){
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if(idx < N){
-        int best = -1;
+__global__ void assignment_step_1d_cuda(
+    const double *X,
+    const double *C,
+    int *assign,
+    double *sse,
+    int N,
+    int K
+){
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if(i < N){
+        int best = 0;
         double bestd = 1e300;
-        for(int i = 0; i < K; i++) {
-            double diff = X[idx] - C[i];
-            double d = diff*diff;
-            if(d < bestd){ bestd = d; best = i; }
-        }
 
-        assign[idx] = best;
-        sse[idx] = bestd;
+        for(int c = 0; c < K; c++){
+            double diff = X[i] - C[c];
+            double d = diff * diff;
+            if(d < bestd){
+                bestd = d;
+                best = c;
+            }
+        }
+        assign[i] = best;
+        sse[i] = bestd;
     }
 }
 
@@ -93,126 +103,135 @@ __global__ void update_sums_counts(
     int N
 ){
     int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < N){
+    if(i < N){
         int c = assign[i];
         atomicAdd(&sum[c], X[i]);
         atomicAdd(&cnt[c], 1);
     }
 }
 
-__global__ void update_centroids(double *C, const double *sum, const int *cnt, const double fallback, int K){
+__global__ void update_centroids(
+    double *C,
+    const double *sum,
+    const int *cnt,
+    double fallback,
+    int K
+){
     int c = blockIdx.x * blockDim.x + threadIdx.x;
-    if (c < K){
-        if (cnt[c] > 0)
-            C[c] = sum[c] / (double)cnt[c];
-        else
-            C[c] = fallback;
+    if(c < K){
+        C[c] = (cnt[c] > 0) ? sum[c] / cnt[c] : fallback;
     }
 }
 
-static void chama_assigment(const double *X, double *cuda_X,
-                            double *C, double *cuda_C,
-                            int *assign, int *cuda_Assign,
-                            double *v_sse, double *cuda_SSE,
-                            int N,
-                            int K,
-                            int blockSize,
-                            int gridSize
-                            ) {
+__global__ void reduce_sse_kernel(
+    const double *sse,
+    double *out,
+    int N
+){
+    __shared__ double buf[256];
 
-    cudaMemcpy(cuda_X, X, N * sizeof(double), cudaMemcpyHostToDevice);
-    cudaMemcpy(cuda_C, C, K * sizeof(double), cudaMemcpyHostToDevice);
+    int tid = threadIdx.x;
+    int i   = blockIdx.x * blockDim.x + tid;
 
-    assignment_step_1d_cuda<<<gridSize, blockSize>>>(cuda_X, cuda_C, cuda_Assign, cuda_SSE, N, K);
+    buf[tid] = (i < N) ? sse[i] : 0.0;
+    __syncthreads();
 
-    cudaDeviceSynchronize();
+    for(int s = blockDim.x / 2; s > 0; s >>= 1){
+        if(tid < s)
+            buf[tid] += buf[tid + s];
+        __syncthreads();
+    }
 
-    cudaMemcpy(assign, cuda_Assign, N * sizeof(int), cudaMemcpyDeviceToHost);
-    cudaMemcpy(v_sse, cuda_SSE, N * sizeof(double), cudaMemcpyDeviceToHost);
+    if(tid == 0)
+        atomicAdd(out, buf[0]);
 }
 
+static void kmeans_1d_cuda(
+    const double *X,
+    double *C,
+    int *assign,
+    int N,
+    int K,
+    int max_iter,
+    double eps,
+    int *iters_out,
+    double *sse_out
+){
+    int blockSize = 256;
+    int gridN = (N + blockSize - 1) / blockSize;
+    int gridK = (K + blockSize - 1) / blockSize;
 
+    // ===== GPU memory =====
+    double *d_X, *d_C, *d_sse, *d_sse_sum, *d_sum;
+    int *d_assign, *d_cnt;
 
-static void chama_update(double *cuda_X,
-                        double *C, double *cuda_C,
-                        int *cuda_Assign,
-                        double *cuda_sum,
-                        int *cuda_cnt,
-                        int N,
-                        int K,
-                        int blockSize,
-                        int gridSize,
-                        int gridK
-                        ) {
-    cudaMemset(cuda_sum, 0, K * sizeof(double));
-    cudaMemset(cuda_cnt, 0, K * sizeof(int));
+    cudaMalloc(&d_X, N * sizeof(double));
+    cudaMalloc(&d_C, K * sizeof(double));
+    cudaMalloc(&d_sse, N * sizeof(double));
+    cudaMalloc(&d_assign, N * sizeof(int));
+    cudaMalloc(&d_sum, K * sizeof(double));
+    cudaMalloc(&d_cnt, K * sizeof(int));
+    cudaMalloc(&d_sse_sum, sizeof(double));
 
-    double firstX;
-    cudaMemcpy(&firstX, cuda_X, sizeof(double), cudaMemcpyDeviceToHost);
+    // copia inicial
+    cudaMemcpy(d_X, X, N * sizeof(double), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_C, C, K * sizeof(double), cudaMemcpyHostToDevice);
 
-    update_sums_counts<<<gridSize, blockSize>>>(cuda_X, cuda_Assign, cuda_sum, cuda_cnt, N);
-    update_centroids<<<gridK, blockSize>>>(cuda_C, cuda_sum, cuda_cnt, firstX, K);
-
-    cudaDeviceSynchronize();
-
-    cudaMemcpy(C, cuda_C, K * sizeof(double), cudaMemcpyDeviceToHost);
-}
-
-
-static void kmeans_1d(const double *X, double *C, int *assign,
-                      int N, int K, int max_iter, double eps,
-                      int *iters_out, double *sse_out)
-{
     double prev_sse = 1e300;
-    double *v_sse = (double*)malloc((size_t)N * sizeof(double));
     double sse = 0.0;
     int it;
 
-    int blockSize = 256;
-    int gridSize = (N + blockSize - 1) / blockSize;
-    int gridK = (K + blockSize - 1) / blockSize;
-    double *cuda_X, *cuda_C, *cuda_SSE;
-    int *cuda_Assign;
+    for(it = 0; it < max_iter; it++){
+        // reset acumuladores
+        cudaMemset(d_sum, 0, K * sizeof(double));
+        cudaMemset(d_cnt, 0, K * sizeof(int));
+        cudaMemset(d_sse_sum, 0, sizeof(double));
 
-    double *cuda_sum;
-    int *cuda_cnt;
+        // assignment
+        assignment_step_1d_cuda<<<gridN, blockSize>>>(
+            d_X, d_C, d_assign, d_sse, N, K
+        );
 
-    cudaMalloc(&cuda_X, N * sizeof(double));
-    cudaMalloc(&cuda_C, K * sizeof(double));
-    cudaMalloc(&cuda_SSE, N * sizeof(double));
-    cudaMalloc(&cuda_Assign, N * sizeof(int));
+        // redução SSE
+        reduce_sse_kernel<<<gridN, blockSize>>>(
+            d_sse, d_sse_sum, N
+        );
 
-    cudaMalloc(&cuda_sum, K * sizeof(double));
-    cudaMalloc(&cuda_cnt, K * sizeof(int));
+        // update
+        update_sums_counts<<<gridN, blockSize>>>(
+            d_X, d_assign, d_sum, d_cnt, N
+        );
+        update_centroids<<<gridK, blockSize>>>(
+            d_C, d_sum, d_cnt, C[0], K
+        );
 
-    for(it=0; it<max_iter; it++){
+        // copiar só 1 double
+        cudaMemcpy(&sse, d_sse_sum, sizeof(double), cudaMemcpyDeviceToHost);
 
-        chama_assigment(X, cuda_X, C, cuda_C, assign, cuda_Assign, v_sse, cuda_SSE, N, K, blockSize, gridSize);
-
-        sse = 0.0;
-        for(int j = 0; j < N; j++) {
-            sse += v_sse[j];
+        double rel = fabs(sse - prev_sse) / prev_sse;
+        if(rel < eps){
+            it++;
+            break;
         }
-
-        double rel = fabs(sse - prev_sse) / (prev_sse > 0.0 ? prev_sse : 1.0);
-        if(rel < eps){ it++; break; }
-
-        chama_update(cuda_X, C, cuda_C, cuda_Assign, cuda_sum, cuda_cnt, N, K, blockSize, gridSize, gridK);
-
         prev_sse = sse;
     }
 
-    cudaFree(cuda_sum);
-    cudaFree(cuda_cnt);
-    cudaFree(cuda_X);
-    cudaFree(cuda_C);
-    cudaFree(cuda_SSE);
-    cudaFree(cuda_Assign);
-    free(v_sse);
+    // resultados finais
+    cudaMemcpy(assign, d_assign, N * sizeof(int), cudaMemcpyDeviceToHost);
+    cudaMemcpy(C, d_C, K * sizeof(double), cudaMemcpyDeviceToHost);
+
+    // free
+    cudaFree(d_X);
+    cudaFree(d_C);
+    cudaFree(d_sse);
+    cudaFree(d_assign);
+    cudaFree(d_sum);
+    cudaFree(d_cnt);
+    cudaFree(d_sse_sum);
+
     *iters_out = it;
     *sse_out = sse;
 }
-
 /* ---------- main ---------- */
 int main(int argc, char **argv){
     const char *pathX = "/content/dados.csv";
@@ -235,11 +254,11 @@ int main(int argc, char **argv){
 
     clock_t t0 = clock();
     int iters = 0; double sse = 0.0;
-    kmeans_1d(X, C, assign, N, K, max_iter, eps, &iters, &sse);
+    kmeans_1d_cuda(X, C, assign, N, K, max_iter, eps, &iters, &sse);
     clock_t t1 = clock();
     double ms = 1000.0 * (double)(t1 - t0) / (double)CLOCKS_PER_SEC;
 
-    printf("K-means 1D (naive)\n");
+    printf("K-means 1D Cuda\n");
     printf("N=%d K=%d max_iter=%d eps=%g\n", N, K, max_iter, eps);
     printf("Iterações: %d | SSE final: %.6f | Tempo: %.1f ms\n", iters, sse, ms);
 
