@@ -100,10 +100,10 @@ double assignment_local(const double *X, const double *C,
 }
 /* ---------- kmeans MPI ---------- */
 
-void kmeans_1d_mpi(double *X_local, int local_N, double *C, int K,
+int kmeans_1d_mpi(double *X_local, int local_N, double *C, int K,
                    int max_iter, double eps,
                    int rank, int size,
-                   int *assign_local, int moacir)
+                   int *assign_local, double reference_point, double *final_SSE)
 {
     double *sum_local  = malloc(K * sizeof(double));
     int    *cnt_local  = malloc(K * sizeof(int));
@@ -111,27 +111,29 @@ void kmeans_1d_mpi(double *X_local, int local_N, double *C, int K,
     int    *cnt_global = malloc(K * sizeof(int));
 
     double prev_SSE = 1e300;
+    int it;
 
-    for(int it=0; it<max_iter; it++){
+    for(it=0; it<max_iter; it++){
         double SSE_local = assignment_local(X_local, C, assign_local,
                                             local_N, K, sum_local, cnt_local);
 
         double SSE_global;
-        MPI_Reduce(&SSE_local, &SSE_global, 1,
-                   MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+        MPI_Allreduce(&SSE_local, &SSE_global, 1,
+              MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
 
         MPI_Allreduce(sum_local, sum_global, K,
                       MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
 
         MPI_Allreduce(cnt_local, cnt_global, K,
                       MPI_INT, MPI_SUM, MPI_COMM_WORLD);
-        for(int c=0;c<K;c++){
-            if(cnt_global[c] > 0)
-                C[c] = sum_global[c] / cnt_global[c];
-            else
-                C[c] = moacir;
+        if(rank == 0) {
+            for(int c=0;c<K;c++){
+                if(cnt_global[c] > 0)
+                    C[c] = sum_global[c] / cnt_global[c];
+                else
+                    C[c] = reference_point ;
+            }
         }
-
         MPI_Bcast(C, K, MPI_DOUBLE, 0, MPI_COMM_WORLD);
 
         double rel;
@@ -141,8 +143,10 @@ void kmeans_1d_mpi(double *X_local, int local_N, double *C, int K,
 
         if(rel < eps){ it++; break;};
 
-        if(rank == 0) prev_SSE = SSE_global;
-        printf("\nSSE_GLOBAL: %f\n", SSE_global);
+        if(rank == 0) {
+            prev_SSE = SSE_global;
+            *final_SSE = SSE_global;
+        }
 
     }
 
@@ -150,6 +154,7 @@ void kmeans_1d_mpi(double *X_local, int local_N, double *C, int K,
     free(cnt_local);
     free(sum_global);
     free(cnt_global);
+    return it;
 }
 
 /* ---------- MAIN MPI ---------- */
@@ -179,14 +184,22 @@ int main(int argc, char **argv){
     double *X_full = NULL;
     double *C = NULL;
 
-    /* apenas rank 0 lê arquivos */
+    /*----Apenas o master lê os dados*/
     if(rank == 0){
         X_full = read_csv_1col(pathX, &N);
         C      = read_csv_1col(pathC, &K);
+        printf("K-means 1D (naive)\n");
+        printf("N=%d K=%d max_iter=%d eps=%g\n", N, K, max_iter, eps);
     }
 
-    int moacir = X_full[0];
-
+    
+    double reference_point;
+    double final_SSE;
+    if(rank == 0){
+        reference_point = X_full[0];
+    }
+    /*----Master distribuí dados necessários*/
+    MPI_Bcast(&reference_point, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
     MPI_Bcast(&N, 1, MPI_INT, 0, MPI_COMM_WORLD);
     MPI_Bcast(&K, 1, MPI_INT, 0, MPI_COMM_WORLD);
 
@@ -201,6 +214,7 @@ int main(int argc, char **argv){
     int base = N / size;
     int r = N % size;
 
+    /* cada rank pega uma parte, a divisão é feita igual */
     for(int i=0, off=0;i<size;i++){
         counts[i] = base + (i < r);
         displs[i] = off;
@@ -215,10 +229,16 @@ int main(int argc, char **argv){
                  0, MPI_COMM_WORLD);
 
     int *assign_local = malloc(local_N * sizeof(int));
+    
+    /*------onde chamamos de fato o kmeans----- */
+    double t0 = MPI_Wtime();
 
-    kmeans_1d_mpi(X_local, local_N, C, K, max_iter, eps,
-                  rank, size, assign_local, moacir);
-
+    int iters = kmeans_1d_mpi(X_local, local_N, C, K, max_iter, eps,
+                  rank, size, assign_local, reference_point, &final_SSE);
+    
+    double t1 = MPI_Wtime();
+    double ms = (t1 - t0) * 1000.0;
+    /*------fim kmeans----- */
     int *assign_full = NULL;
     if(rank == 0)
         assign_full = malloc(N * sizeof(int));
@@ -228,13 +248,15 @@ int main(int argc, char **argv){
                 0, MPI_COMM_WORLD);
 
     if(rank == 0){
+        printf("K-means 1D (MPI)\n");
+        printf("N=%d K=%d max_iter=%d eps=%g\n", N, K, max_iter, eps);
+        printf("Iterações: %d | SSE final: %.6f | Tempo: %.1f ms\n",
+            iters, final_SSE, ms);
         write_assign_csv(outAssign, assign_full, N);
         write_centroids_csv(outCentroid, C, K);
         free(assign_full);
         free(X_full);
     }
-
-    printf("\noi: %d\n", rank);
 
     free(X_local);
     free(assign_local);
